@@ -1,0 +1,156 @@
+---
+title: "hw2_az2852"
+output: html_document
+date: "2025-03-14"
+---
+
+```{r}
+library(caret) 
+library(tidymodels)
+library(splines)
+library(mgcv)
+library(pdp)
+library(earth)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+```
+
+```{r}
+college = read_csv("College.csv")
+```
+
+```{r}
+set.seed(2)
+
+#prepare data
+clean_college = janitor::clean_names(college) %>% 
+  select(-college)
+
+data_split <- initial_split(clean_college, prop = 0.8)
+
+# Extract the training and test data
+train_data <- training(data_split)
+test_data <- testing(data_split)
+```
+
+## 1(a)
+```{r}
+set.seed(2)
+
+# create grid for plotting
+perc_alumni.grid <- seq(min(train_data$perc_alumni), max(train_data$perc_alumni), length.out = 100)
+
+#range of df
+df_values <- seq(1,10, by = 1)  
+
+pred_df <- data.frame()
+
+for (df in df_values) {
+  fit.ss <- smooth.spline(train_data$perc_alumni, train_data$outstate, df = df)
+  pred.ss <- predict(fit.ss, x = perc_alumni.grid)
+  
+  temp_df <- data.frame(
+    perc_alumni = perc_alumni.grid,
+    pred = pred.ss$y,
+    df = as.factor(df)
+  )
+  
+  pred_df <- rbind(pred_df, temp_df)  
+}
+
+p <- ggplot(clean_college, aes(x = perc_alumni, y = outstate)) +
+  geom_point(alpha = 0.4) +  # Scatter plot of raw data
+  theme_bw()
+
+p + geom_line(data = pred_df, aes(x = perc_alumni, y = pred, color = df), size = 1.2) +
+  labs(title = "Smoothing Spline Fits for Different Degrees of Freedom",
+       x = "Percentage of Alumni Who Donate",
+       y = "Out-of-State Tuition") +
+  scale_color_discrete(name = "Degrees of Freedom")
+
+```
+At lower dfs, the model appears linear. As df increases, the curve becomes more wiggly, especially at the upper range of x values. Models with higher degrees of freedom caputure more fluctuations in the data, while it might be overly sensitive to small fluctuations. 
+
+We can obtain the optimal model using test MSE. df = 2 appears to be the best option.
+```{r}
+best_df = 2
+
+fit.best <- smooth.spline(train_data$perc_alumni, train_data$outstate, df = best_df)
+
+#plot
+perc_alumni.grid <- seq(min(clean_college$perc_alumni), max(clean_college$perc_alumni), length.out = 100)
+
+pred.best <- predict(fit.best, x = perc_alumni.grid)
+
+pred.best.df <- data.frame(pred = pred.best$y, perc_alumni = perc_alumni.grid)
+
+ggplot(clean_college, aes(x = perc_alumni, y = outstate)) +
+  geom_point(alpha = 0.4) +
+  geom_line(data = pred.best.df, aes(x = perc_alumni, y = pred), color = "red", size = 1.5) +
+  labs(title = paste("Optimal Smoothing Spline Fit (df =", best_df, ")"),
+       x = "Percentage of Alumni Who Donate",
+       y = "Out-of-State Tuition")
+
+```
+
+## (b)
+```{r}
+mars_control <- trainControl(method = "cv", number = 10)
+mars_grid <- expand.grid(degree = 1:5, nprune = 2:15)
+
+mars_model <- train(
+  outstate ~ ., 
+  data = train_data, 
+  method = "earth",
+  tuneGrid = mars_grid, 
+  trControl = mars_control
+)
+
+ggplot(mars_model)
+
+best_mars_model <- mars_model$bestTune
+print(best_mars_model)
+
+mars_coefficients <- coef(mars_model$finalModel)
+print(mars_coefficients)
+
+p1 <- pdp::partial(mars_model, pred.var = "expend", grid.resolution = 10) %>% autoplot()
+
+p2 <- pdp::partial(mars_model, pred.var = c("enroll", "expend"), grid.resolution = 10) %>%
+  pdp::plotPartial(levelplot = FALSE, zlab = "yhat", drape = TRUE, screen = list(z = 20, x = -60))
+
+grid.arrange(p1, p2, ncol = 2)
+mars_predictions <- predict(mars_model, newdata = test_data)
+
+
+mars_mse <- mean((mars_predictions - test_data$outstate)^2)
+print(paste("Test MSE for MARS model:", round(mars_mse, 2)))
+```
+### (c)
+
+```{r}
+gam_model <- gam(
+  outstate ~ s(apps) + s(accept) + s(enroll) + s(top10perc) + s(top25perc) +
+    s(f_undergrad) + s(p_undergrad) + s(room_board) + s(books) +
+    s(personal) + s(ph_d) + s(terminal) + s(s_f_ratio) + 
+    s(perc_alumni) + s(expend) + s(grad_rate),
+  data = train_data
+)
+
+summary(gam_model)
+plot.gam(gam_model, pages = 4)
+
+gam_predictions <- predict(gam_model, newdata = test_data, type = "response")
+
+gam_mse <- mean((gam_predictions - test_data$outstate)^2)
+print(paste("Test MSE for GAM model:", gam_mse))
+```
+## (d)
+
+In this dataset, the GAM achieved a lower test MSE `r gam_mse` compared to the MARS model `r mars_mse``, This suggests that GAM slightly outperforms MARS in predictive accuracy. However, the difference is small, which suggests that both models perform similarly.
+
+In general, if the relationship between most predictors and response is nonlinear, a MARS model is preferable because it can automatically detect interactions and nonlinearities. But it might lead to the problem of overfitting.
+If the relationship is mostly linear, a GAM model might perform well, as it preserves linearity between the outcome and some predictors, which makes the model more simple and easier to interpret.
+
+The decision depends on the underlying patterns in the data. If clear nonlinear patterns exist, MARS is worth considering; otherwise, a simpler model might be preferable.
